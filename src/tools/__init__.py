@@ -4,8 +4,10 @@
 from src.tools.tools_academic import (
     get_student_academic_records,
     get_daily_activity_and_wellbeing,
+    verify_parent_access,
     AcademicRecordInput,
-    DailyWellbeingInput
+    DailyWellbeingInput,
+    SecurityVerificationInput
 )
 from src.tools.tools_resources import (
     get_learning_resources,
@@ -31,5 +33,11 @@ AVAILABLE_TOOLS = [
         "description": "Tìm kiếm kho bài tập bổ trợ, phương pháp học tập tư duy từ thư viện nhà trường. Đầu vào: subject (str), grade (int), topic (str hoặc bỏ trống).",
         "function": get_learning_resources,
         "input_model": LearningResourceInput
+    },
+    {
+        "name": "verify_parent_access",
+        "description": "Xác thực mã OTP của phụ huynh trước khi truy xuất dữ liệu nhạy cảm. Đầu vào: student_id (str), otp_code (str).",
+        "function": verify_parent_access,
+        "input_model": SecurityVerificationInput
     }
 ]

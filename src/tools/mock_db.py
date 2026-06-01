@@ -63,3 +63,14 @@ RESOURCE_DB = {
         ]
     }
 }
+
+SECURITY_OTP_DB = {
+    "HS001": {
+        "correct_otp": "123456",       
+        "parent_phone": "0912xxx345"
+    },
+    "HS002": {
+        "correct_otp": "654321",
+        "parent_phone": "0987xxx999"
+    }
+}
