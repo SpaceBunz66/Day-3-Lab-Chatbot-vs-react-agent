@@ -2,7 +2,13 @@ import os
 import re
 import inspect
 import json
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import List, Dict, Any, Optional
+
+AGENT_TIMEOUT_SECONDS = 180   # 3 phút
+TOOL_TIMEOUT_SECONDS  = 30    # 30 giây mỗi tool call
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
 from src.telemetry.metrics import tracker
@@ -148,9 +154,19 @@ class ReActAgent:
             if input_model is not None:
                 validated = input_model(**kwargs)
                 kwargs = validated.model_dump()
-            return str(func(**kwargs))
+            logger.log_event("TOOL_CALL", {"tool": tool_name, "args": kwargs})
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func, **kwargs)
+                try:
+                    result = str(future.result(timeout=TOOL_TIMEOUT_SECONDS))
+                    logger.log_event("TOOL_RESULT", {"tool": tool_name, "result_preview": result[:300]})
+                    return result
+                except FuturesTimeoutError:
+                    logger.log_event("TOOL_TIMEOUT", {"tool": tool_name, "timeout": TOOL_TIMEOUT_SECONDS})
+                    return json.dumps({"error": f"tool_timeout:{tool_name}"}, ensure_ascii=False)
         except Exception as exc:
-            return f"Error executing tool '{tool_name}': {exc}"
+            logger.log_event("TOOL_ERROR", {"tool": tool_name, "error": str(exc)})
+            return json.dumps({"error": f"tool_error:{tool_name}:{exc}"}, ensure_ascii=False)
 
     # --- keyword sets for intent detection ---
     _ATTENDANCE_KW = {
@@ -166,12 +182,19 @@ class ReActAgent:
         "tình hình", "tinh hinh", "kết quả", "ket qua", "học tập",
         "hoc tap", "tổng hợp", "nhận xét", "nhan xet", "gợi ý", "goi y",
     }
+    _ROADMAP_KW = {
+        "lộ trình", "lo trinh", "kế hoạch", "ke hoach", "hướng dẫn",
+        "cải thiện", "cai thien", "nâng điểm", "nang diem", "học thế nào",
+        "kèm cặp", "kem cap", "hỗ trợ học", "phương pháp", "phuong phap",
+        "tài liệu", "tai lieu", "bài tập", "bai tap", "ôn tập", "on tap",
+    }
 
     def _detect_intent(self, question: str) -> str:
-        """Return 'attendance', 'scores', or 'full' based on question keywords."""
+        """Return 'attendance', 'scores', 'roadmap', or 'full' based on question keywords."""
         q = (question or "").lower()
-        tokens = set(re.split(r"[\s,;]+", q))
-        # Check multi-word phrases first
+        # Check roadmap first (most specific)
+        if any(kw in q for kw in self._ROADMAP_KW):
+            return "roadmap"
         if any(kw in q for kw in self._FULL_KW):
             return "full"
         if any(kw in q for kw in self._ATTENDANCE_KW):
@@ -187,7 +210,19 @@ class ReActAgent:
             return raw
 
         if isinstance(data, dict) and data.get("error"):
-            return str(data["error"])
+            err = str(data["error"])
+            if err.startswith("tool_timeout:"):
+                tool = err.split(":", 2)[1] if ":" in err else "công cụ"
+                return (
+                    f"⏱️ Yêu cầu mất quá nhiều thời gian để xử lý (>{TOOL_TIMEOUT_SECONDS}s).\n"
+                    f"Vui lòng thử lại sau hoặc liên hệ nhà trường để được hỗ trợ."
+                )
+            if err.startswith("tool_error:"):
+                return (
+                    "⚠️ Hệ thống gặp lỗi khi tra cứu dữ liệu.\n"
+                    "Vui lòng thử lại sau hoặc kiểm tra lại thông tin học sinh."
+                )
+            return err
 
         # --- Academic records ---
         if isinstance(data, dict) and data.get("name") and data.get("subjects"):
@@ -250,6 +285,9 @@ class ReActAgent:
                 score_lines, _ = scores_block()
                 return "\n".join([header] + score_lines)
 
+            if intent == "roadmap":
+                return self._build_roadmap(header, name, grade, subjects, remark)
+
             # intent == "full"
             lines = attendance_block()
             lines.append("")
@@ -291,6 +329,104 @@ class ReActAgent:
 
         return json.dumps(data, ensure_ascii=False)
 
+    def _build_roadmap(self, header: str, name: str, grade, subjects: dict, remark: str) -> str:
+        """Build a detailed weekly learning roadmap: fetches scores, calls get_learning_resources
+        for each weak subject via tool, then synthesises a structured study plan."""
+        grade_int = grade if isinstance(grade, int) else int(str(grade))
+
+        # --- Step 1: Classify subjects from the fetched academic records ---
+        excellent_s, good_s, weak_s, declining_s = [], [], [], []
+        for subj, sc in subjects.items():
+            mid = sc.get("midterm", 0)
+            fin = sc.get("final", 0)
+            avg = (mid + fin) / 2
+            status = sc.get("status", "")
+            if status == "Xuất sắc" or avg >= 8.5:
+                excellent_s.append((subj, sc))
+            elif status in ("Tốt", "Khá") or avg >= 6.5:
+                good_s.append((subj, sc))
+            else:
+                weak_s.append((subj, sc))
+            if isinstance(mid, (int, float)) and isinstance(fin, (int, float)) and fin < mid:
+                declining_s.append(subj)
+
+        # --- Step 2: Fetch learning resources via tool for each subject that needs attention ---
+        resources_map: dict = {}
+        subjects_needing_resources = [s for s, _ in weak_s] + [s for s, _ in good_s if s in declining_s]
+        for subj in subjects_needing_resources:
+            raw_res = self._invoke_tool("get_learning_resources", {"subject": subj, "grade": grade_int})
+            if raw_res:
+                try:
+                    parsed = json.loads(raw_res)
+                    if isinstance(parsed, list):
+                        resources_map[subj] = parsed
+                except Exception:
+                    pass
+
+        # --- Step 3: Build analysis section ---
+        lines = [header, "", "📊 PHÂN TÍCH TOÀN BỘ ĐIỂM SỐ:"]
+
+        for subj, sc in subjects.items():
+            mid = sc.get("midterm", "?")
+            fin = sc.get("final", "?")
+            status = sc.get("status", "")
+            trend = ""
+            if isinstance(mid, (int, float)) and isinstance(fin, (int, float)):
+                trend = " 📈 (cải thiện)" if fin > mid else (" 📉 (giảm sút — cần chú ý!)" if fin < mid else " ➡️ (giữ nguyên)")
+            emoji = "🌟" if status == "Xuất sắc" else ("✅" if status in ("Tốt", "Khá") else "⚠️")
+            lines.append(f"  {emoji} {subj}: GK {mid} → CK {fin}{trend}  [{status}]")
+
+        # --- Step 4: Teacher remark analysis ---
+        if remark:
+            lines += ["", "💬 NHẬN XÉT GIÁO VIÊN:", f'  "{remark}"']
+            remark_lower = remark.lower()
+            if "bảng cửu chương" in remark_lower:
+                lines.append("  ➡️  Điểm nghẽn: học thuộc bảng cửu chương — ưu tiên cao nhất.")
+            if "mất tập trung" in remark_lower or "tập trung" in remark_lower:
+                lines.append("  ➡️  Gợi ý: học vào buổi sáng sớm, mỗi lần 25 phút (kỹ thuật Pomodoro).")
+            if "viết văn" in remark_lower or "sáng tạo" in remark_lower:
+                lines.append("  ➡️  Điểm mạnh: kỹ năng viết văn — phát huy bằng cách luyện đề mở rộng.")
+            if "tự tin" in remark_lower or "phát biểu" in remark_lower:
+                lines.append("  ➡️  Gợi ý: khuyến khích con phát biểu mỗi ngày ít nhất 1 lần ở lớp.")
+            if "muộn" in remark_lower or "vắng" in remark_lower:
+                lines.append("  ➡️  Lưu ý: chuyên cần ảnh hưởng trực tiếp đến học lực — cần đảm bảo đi học đúng giờ.")
+
+        # --- Step 5: Weekly roadmap using fetched resources ---
+        lines += ["", "🗓️ LỘ TRÌNH KÈM CẶP ĐỀ XUẤT (THEO TUẦN):"]
+
+        week = 1
+        for subj, sc in weak_s:
+            fin = sc.get("final", 0)
+            note = "Ôn kiến thức nền tảng (điểm dưới 5)" if fin < 5 else "Ôn lại các dạng bài hay sai, luyện thêm bài tập"
+            lines.append(f"  📌 Tuần {week}–{week + 1}: [{subj}] {note}")
+            for res in resources_map.get(subj, [])[:2]:
+                lines.append(f"    📚 {res['title']} ({res['type']})")
+            if not resources_map.get(subj):
+                lines.append(f"    📚 Liên hệ nhà trường để nhận tài liệu bổ trợ môn {subj} khối {grade_int}.")
+            week += 2
+
+        for subj, sc in good_s:
+            if subj in declining_s:
+                lines.append(f"  📌 Tuần {week}: [{subj}] Điểm giảm nhẹ — ôn lại bài tuần gần nhất để củng cố.")
+                for res in resources_map.get(subj, [])[:1]:
+                    lines.append(f"    📚 {res['title']} ({res['type']})")
+                week += 1
+
+        if excellent_s:
+            names = ", ".join(s for s, _ in excellent_s)
+            lines.append(f"  ⭐ Duy trì: {names} — luyện thêm đề nâng cao để giữ vững kết quả.")
+
+        # --- Step 6: Daily habits ---
+        lines += [
+            "",
+            "💡 THÓI QUEN HỌC TẬP HÀNG NGÀY:",
+            "  • 25 phút/ngày ôn môn yếu (buổi tối sau bữa ăn, không dùng điện thoại).",
+            "  • Đọc lại bài ghi chép hôm trước trước khi đi ngủ (5 phút).",
+            "  • Cuối tuần làm 1 bài kiểm tra ngắn để đo tiến bộ.",
+            "  • Khen ngợi khi con đạt mục tiêu nhỏ để duy trì động lực.",
+        ]
+        return "\n".join(lines)
+
     def _route_with_tools(
         self, user_input: str, history: Optional[List[tuple]] = None
     ) -> Optional[str]:
@@ -299,6 +435,11 @@ class ReActAgent:
         student_id = self._extract_student_id(user_input)
         if not student_id and history:
             student_id = self._detect_student_from_conversation(user_input, history)
+
+        logger.log_event("STUDENT_DETECT", {
+            "student_id": student_id or "(none)",
+            "from": "current_input" if self._extract_student_id(user_input) else "history",
+        })
 
         academic_keywords = [
             "điểm", "hoc luc", "học lực", "bảng điểm", "chuyên cần", "nhận xét",
@@ -309,21 +450,34 @@ class ReActAgent:
         wellbeing_keywords = ["sinh hoạt", "thực đơn", "sức khỏe", "tâm lý", "hôm nay", "ăn gì", "an gi"]
 
         if student_id and any(k in text for k in academic_keywords):
+            logger.log_event("ROUTE_DECISION", {"route": "get_student_academic_records", "reason": "academic keyword match"})
             raw = self._invoke_tool("get_student_academic_records", {"student_id": student_id})
             if raw is not None:
-                return self._build_tool_response(raw)
+                intent = self._detect_intent(user_input)
+                logger.log_event("INTENT_DETECT", {"intent": intent, "question": user_input})
+                result = self._build_tool_response(raw, question=user_input)
+                logger.log_event("FINAL_ANSWER", {"intent": intent, "preview": result[:200]})
+                return result
 
         if student_id and any(k in text for k in wellbeing_keywords):
+            logger.log_event("ROUTE_DECISION", {"route": "get_daily_activity_and_wellbeing", "reason": "wellbeing keyword match"})
             raw = self._invoke_tool("get_daily_activity_and_wellbeing", {"student_id": student_id})
             if raw is not None:
-                return self._build_tool_response(raw)
+                result = self._build_tool_response(raw, question=user_input)
+                logger.log_event("FINAL_ANSWER", {"intent": "wellbeing", "preview": result[:200]})
+                return result
 
         # Fallback: nếu tìm thấy học sinh mà không có keyword cụ thể,
         # vẫn trả về học bạ thay vì để LLM đoán
         if student_id and not any(k in text for k in wellbeing_keywords):
+            logger.log_event("ROUTE_DECISION", {"route": "get_student_academic_records", "reason": "student found, fallback to academic"})
             raw = self._invoke_tool("get_student_academic_records", {"student_id": student_id})
             if raw is not None:
-                return self._build_tool_response(raw)
+                intent = self._detect_intent(user_input)
+                logger.log_event("INTENT_DETECT", {"intent": intent, "question": user_input})
+                result = self._build_tool_response(raw, question=user_input)
+                logger.log_event("FINAL_ANSWER", {"intent": intent, "preview": result[:200]})
+                return result
 
         return None
 
@@ -401,7 +555,11 @@ LƯU Ý QUAN TRỌNG:
         3. Appends Observation to prompt and repeats until Final Answer or max_steps.
         """
         history = history or []
-        logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
+        logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name, "history_turns": len(history or [])})
+        _start_time = time.time()
+
+        def _timed_out() -> bool:
+            return (time.time() - _start_time) >= AGENT_TIMEOUT_SECONDS
 
         if self._is_greeting(user_input):
             greeting_response = self._build_greeting_response()
@@ -421,12 +579,20 @@ LƯU Ý QUAN TRỌNG:
         steps = 0
 
         while steps < self.max_steps:
-            logger.log_event("AGENT_STEP", {"step": steps + 1})
-            
+            if _timed_out():
+                logger.log_event("AGENT_TIMEOUT", {"steps": steps, "elapsed_s": AGENT_TIMEOUT_SECONDS})
+                return (
+                    f"⏱️ Yêu cầu của bạn mất quá {AGENT_TIMEOUT_SECONDS // 60} phút để xử lý.\n"
+                    "Vui lòng thử lại sau hoặc đặt câu hỏi ngắn gọn hơn."
+                )
+            print(f"\n{'='*60}")
+            print(f"[ReAct] Step {steps + 1}")
+            print(f"{'='*60}")
+
             # Generate LLM response
             res = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt(student_context))
             content = res["content"].strip()
-            
+
             # Track metrics
             tracker.track_request(
                 provider=res.get("provider", "unknown"),
@@ -434,86 +600,77 @@ LƯU Ý QUAN TRỌNG:
                 usage=res.get("usage", {}),
                 latency_ms=res.get("latency_ms", 0)
             )
-            
-            logger.log_event("LLM_RESPONSE", {"content": content})
-            
-            # Print intermediate reasoning to terminal
-            print(f"\n[Step {steps + 1}]")
-            print(content)
-            
-            # Regex to match Action and Final Answer
-            action_match = re.search(r"Action:\s*(\w+)\((.*)\)", content)
-            final_match = re.search(r"Final Answer:\s*(.*)", content, re.DOTALL)
-            
+
+            # --- Extract and log Thought / Action / Final Answer separately ---
+            thought_match = re.search(r"Thought:\s*(.*?)(?=\nAction:|\nFinal Answer:|\Z)", content, re.DOTALL)
+            action_match  = re.search(r"Action:\s*(\w+)\((.*?)\)", content, re.DOTALL)
+            final_match   = re.search(r"Final Answer:\s*(.*)", content, re.DOTALL)
+
+            thought_text = thought_match.group(1).strip() if thought_match else ""
+            if thought_text:
+                print(f"[THOUGHT] {thought_text}")
+                logger.log_event("REACT_THOUGHT", {"step": steps + 1, "thought": thought_text})
+
             if action_match:
                 tool_name = action_match.group(1)
                 tool_args = action_match.group(2)
 
-                # Execute tool
-                raw_observation = self._execute_tool(tool_name, tool_args)
-                print(f"\nObservation: {raw_observation}")
+                print(f"[ACTION]  {tool_name}({tool_args})")
+                logger.log_event("REACT_ACTION", {"step": steps + 1, "tool": tool_name, "args": tool_args})
 
-                # Format the raw tool result into a rich response and return immediately
-                # (avoid LLM synthesis step which can drop data on small models)
+                raw_observation = self._execute_tool(tool_name, tool_args)
+
+                print(f"[OBSERVATION] {raw_observation[:300]}{'...' if len(raw_observation) > 300 else ''}")
+                logger.log_event("REACT_OBSERVATION", {"step": steps + 1, "tool": tool_name, "observation_preview": raw_observation[:300]})
+
                 formatted = self._build_tool_response(raw_observation, question=user_input)
-                logger.log_event("AGENT_END", {
-                    "status": "tool_success",
-                    "tool": tool_name,
-                    "steps": steps + 1,
-                    "final_answer": formatted,
-                })
-                logger.log_event("TOOL_EXECUTION", {
-                    "tool": tool_name,
-                    "arguments": tool_args,
-                    "observation": raw_observation,
-                })
+                print(f"[FINAL ANSWER] (formatted from tool result)")
+                logger.log_event("REACT_FINAL_ANSWER", {"step": steps + 1, "source": "tool", "tool": tool_name, "preview": formatted[:200]})
                 return formatted
 
             elif final_match:
                 final_answer = final_match.group(1).strip()
-                logger.log_event("AGENT_END", {"status": "success", "steps": steps + 1, "final_answer": final_answer})
+                print(f"[FINAL ANSWER] {final_answer[:200]}{'...' if len(final_answer) > 200 else ''}")
+                logger.log_event("REACT_FINAL_ANSWER", {"step": steps + 1, "source": "llm", "preview": final_answer[:200]})
                 return self._clean_response(final_answer)
             else:
-                logger.log_event("PARSER_ERROR", {"content": content})
-                
+                print(f"[PARSE FAIL] Could not extract Action or Final Answer from LLM output.")
+                print(f"[RAW OUTPUT] {content[:300]}")
+                logger.log_event("REACT_PARSE_FAIL", {"step": steps + 1, "raw_preview": content[:300]})
+
                 # Fallback parsing check
                 if "Final Answer:" in content:
                     parts = content.split("Final Answer:")
                     final_answer = parts[-1].strip()
-                    logger.log_event("AGENT_END", {"status": "success_fallback", "steps": steps + 1})
+                    print(f"[FINAL ANSWER] (fallback split) {final_answer[:200]}")
+                    logger.log_event("REACT_FINAL_ANSWER", {"step": steps + 1, "source": "fallback_split", "preview": final_answer[:200]})
                     return self._clean_response(final_answer)
 
                 # Fallback for small/local models that return only `Thought:` text.
-                thought_match = re.search(r"Thought:\s*(.*)", content, re.DOTALL)
-                if thought_match:
-                    final_answer = thought_match.group(1).strip()
-                    if final_answer:
-                        logger.log_event("AGENT_END", {
-                            "status": "success_thought_fallback",
-                            "steps": steps + 1,
-                            "final_answer": final_answer,
-                        })
-                        return self._clean_response(final_answer)
+                if thought_text:
+                    print(f"[FINAL ANSWER] (fallback thought) {thought_text[:200]}")
+                    logger.log_event("REACT_FINAL_ANSWER", {"step": steps + 1, "source": "fallback_thought", "preview": thought_text[:200]})
+                    return self._clean_response(thought_text)
 
                 # Last-resort fallback to avoid UI hanging on parser mismatch.
                 cleaned_content = content.strip()
                 if cleaned_content:
-                    logger.log_event("AGENT_END", {
-                        "status": "success_raw_fallback",
-                        "steps": steps + 1,
-                        "final_answer": cleaned_content,
-                    })
+                    print(f"[FINAL ANSWER] (fallback raw) {cleaned_content[:200]}")
+                    logger.log_event("REACT_FINAL_ANSWER", {"step": steps + 1, "source": "fallback_raw", "preview": cleaned_content[:200]})
                     return self._clean_response(cleaned_content)
-                
+
                 # Instruct agent to correct format
                 correction_note = "System Note: Your output did not match 'Action: tool_name(args)' or 'Final Answer: response'. Please follow the instructions."
                 current_prompt += f"\n{content}\n{correction_note}\n"
-                print(f"\n[SYSTEM] {correction_note}")
+                print(f"[SYSTEM] {correction_note}")
                 
             steps += 1
             
         logger.log_event("AGENT_TIMEOUT", {"steps": steps})
-        return f"Timeout: Exceeded max steps ({self.max_steps}). Current prompt state: {current_prompt}"
+        return (
+            f"⏱️ Yêu cầu của bạn mất quá {AGENT_TIMEOUT_SECONDS // 60} phút để xử lý.\n"
+            "Vui lòng thử lại sau hoặc đặt câu hỏi ngắn gọn hơn."
+        )
 
     def _parse_args(self, args_str: str) -> Any:
         """
@@ -572,6 +729,7 @@ LƯU Ý QUAN TRỌNG:
     def _execute_tool(self, tool_name: str, args: str) -> str:
         """
         Helper method to execute tools by name with robust argument mapping.
+        Wraps execution in a timeout to prevent hanging.
         """
         for tool in self.tools:
             if tool['name'] == tool_name:
@@ -579,25 +737,31 @@ LƯU Ý QUAN TRỌNG:
                     parsed_args = self._parse_args(args)
                     func = tool.get('func') or tool.get('function')
                     if not callable(func):
-                        return f"Error executing tool '{tool_name}': function not callable."
+                        return json.dumps({"error": f"tool_error:{tool_name}:function not callable"}, ensure_ascii=False)
                     sig = inspect.signature(func)
                     input_model = tool.get('input_model')
-                    
-                    if isinstance(parsed_args, dict):
-                        # Filter arguments to avoid unexpected keyword errors
-                        valid_args = {k: v for k, v in parsed_args.items() if k in sig.parameters}
-                        if input_model is not None:
-                            valid_args = input_model(**valid_args).model_dump()
-                        return str(func(**valid_args))
-                    elif isinstance(parsed_args, list):
-                        return str(func(*parsed_args))
-                    else:
-                        if len(sig.parameters) == 1:
-                            return str(func(parsed_args))
+
+                    def _call():
+                        if isinstance(parsed_args, dict):
+                            valid_args = {k: v for k, v in parsed_args.items() if k in sig.parameters}
+                            if input_model is not None:
+                                valid_args = input_model(**valid_args).model_dump()
+                            return str(func(**valid_args))
+                        elif isinstance(parsed_args, list):
+                            return str(func(*parsed_args))
                         else:
                             return str(func(parsed_args))
+
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(_call)
+                        try:
+                            return future.result(timeout=TOOL_TIMEOUT_SECONDS)
+                        except FuturesTimeoutError:
+                            logger.log_event("TOOL_TIMEOUT", {"tool": tool_name, "timeout": TOOL_TIMEOUT_SECONDS})
+                            return json.dumps({"error": f"tool_timeout:{tool_name}"}, ensure_ascii=False)
                 except Exception as e:
-                    return f"Error executing tool '{tool_name}': {str(e)}"
-                    
-        return f"Tool '{tool_name}' not found."
+                    logger.log_event("TOOL_ERROR", {"tool": tool_name, "error": str(e)})
+                    return json.dumps({"error": f"tool_error:{tool_name}:{e}"}, ensure_ascii=False)
+
+        return json.dumps({"error": f"tool_error:{tool_name}:not found"}, ensure_ascii=False)
 
