@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trợ Lý AI Hỗ Trợ Phụ Huynh</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Thanh icon trái -->
+      <nav class="icon-rail">
+        <div class="rail-logo">✦</div>
+        <button class="rail-btn active" title="Chat">💬</button>
+        <button class="rail-btn" title="Thư viện">📚</button>
+        <button class="rail-btn" title="Tải lên">⬆️</button>
+        <button class="rail-btn" title="Lịch sử">🕘</button>
+        <button class="rail-btn" title="Cài đặt">⚙️</button>
+      </nav>
+
+      <!-- Sidebar lịch sử hội thoại -->
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <span class="sidebar-title">✨ Trợ lý học tập của con</span>
+        </div>
+
+        <button class="new-chat-btn" id="newChatBtn">
+          + Cuộc hội thoại mới
+        </button>
+
+        <div class="search-box">
+          <span>🔍</span>
+          <input type="text" id="searchInput" placeholder="Tìm hội thoại..." />
+        </div>
+
+        <div class="tabs">
+          <button class="tab active">Hôm nay</button>
+          <button class="tab">Hôm qua</button>
+          <button class="tab">7 ngày qua</button>
+          <button class="tab">Cũ hơn</button>
+        </div>
+
+        <div class="convo-count" id="convoCount">0 cuộc hội thoại</div>
+        <div class="convo-list" id="convoList"></div>
+      </aside>
+
+      <!-- Khu vực chính -->
+      <main class="main">
+        <!-- Header -->
+        <header class="topbar">
+          <div class="logo">⟁</div>
+          <div class="topbar-right">
+            <button class="icon-btn" id="themeBtn" title="Đổi giao diện">
+              🌙
+            </button>
+            <button class="icon-btn" title="Thông báo">🔔</button>
+            <div class="user">
+              <div class="avatar">N</div>
+              <span>Phạm Thị Tuyết Nga</span>
+            </div>
+          </div>
+        </header>
+
+        <!-- Nội dung cuộn -->
+        <section class="content" id="content">
+          <!-- Màn hình chào -->
+          <div class="welcome" id="welcome">
+            <div class="welcome-icon">🎓</div>
+            <h1>Trợ Lý AI Hỗ Trợ Phụ Huynh</h1>
+            <p class="welcome-sub">
+              Kính chào quý phụ huynh! Tôi có thể giúp giải đáp thắc mắc về
+              <b>việc học của con</b>: tình hình học tập, phương pháp đồng hành
+              cùng con, tâm lý lứa tuổi và trao đổi với nhà trường.
+            </p>
+
+            <div class="docs">
+              <span class="docs-label">Tra cứu nhanh:</span>
+              <span class="chip">📊 Điểm các môn</span>
+              <span class="chip">🗓️ Thời khoá biểu</span>
+              <span class="chip">⏰ Đi học muộn</span>
+              <span class="chip">📝 Nhận xét thầy cô</span>
+            </div>
+
+            <div class="suggestions">
+              <button class="suggest-card">
+                📊 Cho tôi xem điểm các môn học của con
+              </button>
+              <button class="suggest-card">
+                🗓️ Thời khoá biểu tuần này của con như thế nào?
+              </button>
+              <button class="suggest-card">
+                ⏰ Tháng này con tôi đi học muộn mấy buổi?
+              </button>
+              <button class="suggest-card">
+                📝 Nhận xét của thầy cô về con trong tuần/tháng qua?
+              </button>
+            </div>
+          </div>
+
+          <!-- Danh sách tin nhắn (ẩn lúc đầu) -->
+          <div class="messages" id="messages"></div>
+        </section>
+
+        <!-- Ô nhập câu hỏi -->
+        <footer class="composer">
+          <div class="input-wrap">
+            <textarea
+              id="questionInput"
+              rows="1"
+              placeholder="Hỏi về việc học của con bạn..."
+            ></textarea>
+            <button class="icon-btn" title="Ghi âm">🎤</button>
+            <button class="send-btn" id="sendBtn" title="Gửi">➤</button>
+          </div>
+          <div class="composer-note">
+            Trợ lý AI mang tính tham khảo, không thay thế tư vấn trực tiếp từ
+            giáo viên. AI có thể mắc lỗi.
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
