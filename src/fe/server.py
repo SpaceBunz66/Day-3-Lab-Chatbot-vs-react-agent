@@ -88,14 +88,18 @@ def chat(req: ChatRequest):
         content = agent.run(req.question, history=history)
         latency_ms = int((time.perf_counter() - start) * 1000)
 
-        logger.log_event("UI_CHAT", {
-            "provider": req.provider or os.getenv("DEFAULT_PROVIDER", "openai"),
+        provider_name = req.provider or os.getenv("DEFAULT_PROVIDER", "openai")
+        logger.log_event("TRACE", {
+            "provider": provider_name,
             "question": req.question,
+            "answer_preview": content[:200] if content else "",
+            "latency_ms": latency_ms,
+            "history_turns": len(req.history),
         })
         return {
             "ok": True,
             "content": content,
-            "provider": req.provider or os.getenv("DEFAULT_PROVIDER", "openai"),
+            "provider": provider_name,
             "latency_ms": latency_ms,
             "usage": {},
         }
