@@ -43,9 +43,10 @@ def get_provider(provider: Optional[str] = None,
 
     if provider == "ollama":
         from src.core.ollama_provider import OllamaProvider
+        base_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://localhost:11434"
         return OllamaProvider(
             model_name=model or os.getenv("DEFAULT_MODEL", "llama3"),
-            host=os.getenv("OLLAMA_HOST"),
+            base_url=base_url,
         )
 
     raise ValueError(

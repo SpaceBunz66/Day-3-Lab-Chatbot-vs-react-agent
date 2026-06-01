@@ -87,6 +87,12 @@ async function send(text) {
   const convo = currentConvo();
   if (convo.messages.length === 0) convo.title = question.slice(0, 40);
 
+  // Lấy lịch sử TRƯỚC khi push câu hỏi mới để tránh bị trùng
+  const historyMessages = (currentConvo()?.messages || []).slice(-10);
+  const history = historyMessages
+    .filter((m) => m.role === "user" || m.role === "bot")
+    .map((m) => ({ role: m.role, content: m.content }));
+
   convo.messages.push({ role: "user", content: question });
   input.value = "";
   input.style.height = "auto";
@@ -104,7 +110,7 @@ async function send(text) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, history }),
     });
     const data = await res.json();
 

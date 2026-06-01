@@ -24,7 +24,19 @@ STUDENT_DB = {
             "Tiếng Việt": {"midterm": 7.0, "final": 8.5, "status": "Khá"},
             "Tiếng Anh": {"midterm": 8.0, "final": 8.0, "status": "Khá"}
         }
-    }
+    },
+    "HS003": {
+        "name": "Lê Hoàng Phúc",
+        "grade": 4,
+        "class": "4A1",
+        "attendance_rate": "95%",
+        "teacher_remark": "Phúc lười học  dạo gần đây hay mất tập trung trong giờ Toán, chưa thuộc bảng cửu chương 7, 8, 9.",
+        "subjects": {
+            "Toán": {"midterm": 6.0, "final": 5.5, "status": "Cần cải thiện"},
+            "Tiếng Việt": {"midterm": 2.5, "final": 3.0, "status": "Kém"},
+            "Tiếng Anh": {"midterm": 5.0, "final": 5.5, "status": "Cần cải thiện"}
+        }
+    },
 }
 
 DAILY_LIFE_DB = {
