@@ -1,9 +1,3 @@
-"""
-Chatbot Baseline — Lab 3
-Đây là baseline đơn giản: chỉ gọi LLM một lần, không có tool, không có vòng lặp.
-Mục đích: so sánh trực tiếp với ReAct Agent để thấy giới hạn của chatbot thuần túy.
-"""
-
 import os
 import sys
 from typing import Dict, Any, Optional
