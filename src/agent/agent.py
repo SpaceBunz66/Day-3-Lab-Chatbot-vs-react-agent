@@ -1,132 +1,210 @@
-
-import os
 import re
-import json
 from typing import List, Dict, Any, Optional
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
+from src.telemetry.metrics import tracker
 
 class ReActAgent:
     """
-    Hệ thống ReAct Agent hoàn chỉnh phục vụ Trợ lý Phụ huynh.
-    Tự động thực hiện chu trình: Tư duy (Thought) -> Hành động (Action) -> Quan sát (Observation).
+    A robust ReAct-style Agent that follows the Thought-Action-Observation loop.
+    Supports dynamic tool execution, argument parsing, and detailed log telemetry.
     """
     
     def __init__(self, llm: LLMProvider, tools: List[Dict[str, Any]], max_steps: int = 5):
         self.llm = llm
-        self.tools = tools  # Nhận cấu trúc AVAILABLE_TOOLS từ src/tools/__init__.py
+        self.tools = tools
         self.max_steps = max_steps
         self.history = []
 
     def get_system_prompt(self) -> str:
         """
-        Xây dựng System Prompt định hình tư duy ReAct bằng tiếng Việt cho LLM.
-        Cung cấp danh sách công cụ và cấu trúc ép buộc đầu ra.
+        Generates the system prompt instructing the agent on the ReAct loop and formatting.
+        Includes descriptions of all available tools.
         """
-        # Trích xuất danh sách tool và mô tả của chúng để nạp vào prompt
         tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
-        
-        return f"""Bạn là một Trợ lý AI thông minh chuyên hỗ trợ Phụ huynh học sinh. 
-                Bạn có quyền truy cập vào các công cụ (tools) sau để tra cứu dữ liệu:
-                {tool_descriptions}
+        return f"""
+Bạn là Trợ lý AI Đồng hành cùng Phụ huynh học sinh (E-School Parent Assistant). Nhiệm vụ của bạn là hỗ trợ phụ huynh theo dõi sát sao tình hình học lực, chuyên cần, thời khóa biểu của con và đưa ra các lời khuyên kèm cặp học tập thực tế từ giáo trình nhà trường (RAG).
 
-                Quy trình làm việc của bạn BẮT BUỘC phải tuân theo định dạng sau một cách nghiêm ngặt:
+KIỂM SOÁT PHẠM VI & NỘI DUNG NHẠY CẢM (GUARDRAILS & OFF-TOPIC CONTROLS):
+- Bạn CHỈ được phép trả lời các câu hỏi liên quan trực tiếp đến học tập, điểm số, chuyên cần, thời khóa biểu và các lời khuyên kèm cặp học tập của học sinh.
+- Đối với các yêu cầu nằm ngoài phạm vi này (như nấu ăn, thời tiết, giải trí, thể thao, game, chính trị, công nghệ chung, v.v.) hoặc các câu hỏi có chứa từ ngữ thô tục, nhạy cảm: Bạn BẮT BUỘC phải dừng lập luận ngay tại Bước 1, TUYỆT ĐỐI không gọi bất kỳ công cụ nào và đi thẳng tới 'Final Answer' để từ chối một cách lịch sự, ân cần (ví dụ: giải thích rằng bạn là trợ lý học tập nên không thể trả lời các chủ đề khác).
 
-                Thought: Phân tích câu hỏi của phụ huynh và xác định bước đi tiếp theo (Cần thông tin gì? Gọi tool nào?).
-                Action: Tên_Tool(Tham_Số_Dạng_JSON)
-                Observation: Kết quả trả về từ công cụ (Bạn sẽ nhận được cái này sau khi Action kích hoạt).
+PHONG CÁCH PHẢN HỒI (TONE & VOICE):
+- Luôn giữ thái độ lịch sự, ân cần, đồng cảm và có tính xây dựng cao (constructive).
+- Tránh đưa ra điểm số hoặc thông báo lỗi chuyên cần một cách khô khan. Hãy giải thích ý nghĩa điểm số, ghi nhận sự cố gắng của học sinh và gợi ý phương án cải thiện cụ thể bằng tiếng Việt rõ ràng.
 
-                ... (Bạn có thể lặp lại chu trình Thought -> Action -> Observation nếu cần thu thập thêm dữ liệu từ các tool khác).
+DANH SÁCH CÔNG CỤ HIỆN CÓ:
+{tool_descriptions}
 
-                Khi đã có đầy đủ thông tin để trả lời trọn vẹn cho phụ huynh, hãy kết thúc bằng định dạng:
-                Final Answer: Câu trả lời tổng hợp cuối cùng bằng tiếng Việt, mạch lạc, nhẹ nhàng và mang tính hỗ trợ cao đối với phụ huynh.
+QUY TẮC LẬP LUẬN (ReAct Framework):
+Để giải quyết yêu cầu của phụ huynh, bạn BẮT BUỘC phải tuân thủ nghiêm ngặt quy trình ReAct.
+Với mỗi bước, bạn chỉ được phép đưa ra đúng một trong hai định dạng sau:
 
-                LƯU Ý QUAN TRỌNG: 
-                1. Sau mỗi từ khóa 'Action:', bạn CHỈ ĐƯỢC PHÉP xuất ra tên hàm kèm JSON thô của tham số, ví dụ: get_student_academic_records({{"student_id": "HS001"}})
-                2. KHÔNG bọc JSON trong ký tự markdown như ```json ... ``` để tránh lỗi phân tách.
-                """
+Thought: dòng suy nghĩ lập luận của bạn (bằng tiếng Anh).
+Action: tên_công_cụ(các_tham_số)
+
+HOẶC
+
+Thought: I have gathered all necessary information from the tools and database. I am ready to formulate a comprehensive, empathetic and constructive response to the parent in Vietnamese.
+Final Answer: câu trả lời hoàn chỉnh, chi tiết và đầy tính xây dựng gửi tới phụ huynh (bằng tiếng Việt).
+
+LƯU Ý QUAN TRỌNG:
+1. LUÔN LUÔN bắt đầu mỗi lượt phản hồi bằng 'Thought:'.
+2. Không tự ý viết dòng 'Observation:' - dòng này sẽ do hệ thống tự động cung cấp ngay sau khi thực thi công cụ.
+3. Chỉ gọi DUY NHẤT một công cụ tại một thời điểm.
+4. Khi gọi công cụ ở dòng 'Action', dùng đúng định dạng hàm lập trình, ví dụ: get_student_grades(student_name="Nguyễn Minh Anh") hoặc search_curriculum_and_advice(subject="Ngữ văn", week=10).
+5. Nếu không cần dùng công cụ nào nữa để trả lời câu hỏi, hãy đi thẳng tới định dạng 'Final Answer'.
+"""
 
     def run(self, user_input: str) -> str:
         """
-        Vòng lặp ReAct cốt lõi (The Agentic Loop).
-        Kiểm soát số bước, gọi LLM, bóc tách Action, chạy Tool và trả về Final Answer.
+        Executes the ReAct loop logic.
+        1. Generates Thought + Action.
+        2. Parses Action and executes Tool.
+        3. Appends Observation to prompt and repeats until Final Answer or max_steps.
         """
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
         
-        # Khởi tạo ngữ cảnh hội thoại ban đầu bao gồm cả prompt hệ thống
-        system_prompt = self.get_system_prompt()
-        current_context = f"Yêu cầu từ Phụ huynh: {user_input}\n"
-        
+        current_prompt = f"Question: {user_input}\n"
         steps = 0
-        while steps < self.max_steps:
-            steps += 1
-            logger.log_event("AGENT_STEP_START", {"step": steps})
-            
-            # 1. Gọi LLM sinh ra chuỗi Thought + Action (hoặc Final Answer)
-            llm_result = self.llm.generate(current_context, system_prompt=system_prompt)
-            llm_output = llm_result["content"]
-            logger.log_event("LLM_METRIC", {
-                "step": steps,
-                "prompt_tokens": llm_result["usage"]["prompt_tokens"],
-                "completion_tokens": llm_result["usage"]["completion_tokens"],
-                "total_tokens": llm_result["usage"]["total_tokens"],
-                "latency_ms": llm_result["latency_ms"]
-            })
 
-            # Cập nhật phản hồi của LLM vào nhật ký chuỗi suy luận
-            current_context += f"\n{llm_output}"
+        while steps < self.max_steps:
+            logger.log_event("AGENT_STEP", {"step": steps + 1})
             
-            # Kiểm tra xem LLM đã tìm ra câu trả lời cuối cùng chưa
-            if "Final Answer:" in llm_output:
-                final_answer = llm_output.split("Final Answer:")[-1].strip()
-                logger.log_event("AGENT_END", {"steps": steps, "status": "SUCCESS"})
-                return final_answer
-                
-            # 2. Phân tách (Parse) hàm Action từ LLM bằng Regex chuyên dụng
-            # Khớp mẫu dạng: Action: tên_hàm({json})
-            action_match = re.search(r"Action:\s*(\w+)\((\{.*?\})\)", llm_output, re.DOTALL)
+            # Generate LLM response
+            res = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
+            content = res["content"].strip()
+            
+            # Track metrics
+            tracker.track_request(
+                provider=res.get("provider", "unknown"),
+                model=self.llm.model_name,
+                usage=res.get("usage", {}),
+                latency_ms=res.get("latency_ms", 0)
+            )
+            
+            logger.log_event("LLM_RESPONSE", {"content": content})
+            
+            # Print intermediate reasoning to terminal
+            print(f"\n[Step {steps + 1}]")
+            print(content)
+            
+            # Regex to match Action and Final Answer
+            action_match = re.search(r"Action:\s*(\w+)\((.*)\)", content)
+            final_match = re.search(r"Final Answer:\s*(.*)", content, re.DOTALL)
             
             if action_match:
-                tool_name = action_match.group(1).strip()
-                tool_args_str = action_match.group(2).strip()
+                tool_name = action_match.group(1)
+                tool_args = action_match.group(2)
                 
-                logger.log_event("TOOL_CALL_DETECTED", {"tool": tool_name, "args": tool_args_str})
+                # Execute tool
+                observation = self._execute_tool(tool_name, tool_args)
+                observation_str = f"Observation: {observation}"
                 
-                # 3. Kích hoạt thực thi công cụ
-                observation_result = self._execute_tool(tool_name, tool_args_str)
+                print(f"\n{observation_str}")
                 
-                # 4. Đút kết quả Observation ngược lại vào ngữ cảnh để LLM đọc ở bước sau
-                current_context += f"\nObservation: {observation_result}"
-                logger.log_event("OBSERVATION_ADDED", {"result": observation_result})
+                # Append current generation + observation back into history
+                current_prompt += f"\n{content}\n{observation_str}\n"
+                
+                logger.log_event("TOOL_EXECUTION", {
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "observation": observation
+                })
+            elif final_match:
+                final_answer = final_match.group(1).strip()
+                logger.log_event("AGENT_END", {"status": "success", "steps": steps + 1, "final_answer": final_answer})
+                return final_answer
             else:
-                # Bẫy lỗi: Nếu LLM không xuất ra đúng định dạng Action mà cũng không có Final Answer
-                error_msg = "Lỗi hệ thống: Định dạng phản hồi của AI không hợp lệ (Thiếu Action hoặc Final Answer)."
-                current_context += f"\nObservation: {error_msg}. Vui lòng sửa lại định dạng chuẩn theo hướng dẫn."
-                logger.log_event("PARSER_ERROR", {"output_failed": llm_output})
-
-        # Nếu vượt quá số bước tối đa (max_steps) mà chưa ra kết quả
+                logger.log_event("PARSER_ERROR", {"content": content})
+                
+                # Fallback parsing check
+                if "Final Answer:" in content:
+                    parts = content.split("Final Answer:")
+                    final_answer = parts[-1].strip()
+                    logger.log_event("AGENT_END", {"status": "success_fallback", "steps": steps + 1})
+                    return final_answer
+                
+                # Instruct agent to correct format
+                correction_note = "System Note: Your output did not match 'Action: tool_name(args)' or 'Final Answer: response'. Please follow the instructions."
+                current_prompt += f"\n{content}\n{correction_note}\n"
+                print(f"\n[SYSTEM] {correction_note}")
+                
+            steps += 1
+            
         logger.log_event("AGENT_TIMEOUT", {"steps": steps})
-        return "Xin lỗi phụ huynh, hệ thống đang bận xử lý dữ liệu sâu. Vui lòng thử lại câu hỏi cụ thể hơn."
+        return f"Timeout: Exceeded max steps ({self.max_steps}). Current prompt state: {current_prompt}"
+
+    def _parse_args(self, args_str: str) -> Any:
+        """
+        Cleans and parses tool arguments from string format (key=value, list, or single value).
+        """
+        args_str = args_str.strip()
+        if not args_str:
+            return {}
+
+        # 1. Check for key=value format (dictionary-like)
+        if '=' in args_str:
+            parsed = {}
+            # Split by comma but respect quotes if any (simplified comma splitting)
+            parts = re.split(r',\s*(?=(?:[^\'"]*[\'"][^\'"]*[\'"])*[^\'"]*$)', args_str)
+            for part in parts:
+                if '=' in part:
+                    k, v = part.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    # Type conversion
+                    try:
+                        if '.' in v:
+                            parsed[k] = float(v)
+                        else:
+                            parsed[k] = int(v)
+                    except ValueError:
+                        parsed[k] = v
+            return parsed
+            
+        # 2. Check for comma-separated positional args (list-like)
+        elif ',' in args_str:
+            parts = re.split(r',\s*(?=(?:[^\'"]*[\'"][^\'"]*[\'"])*[^\'"]*$)', args_str)
+            parsed_list = []
+            for part in parts:
+                part = part.strip().strip('"').strip("'")
+                try:
+                    if '.' in part:
+                        parsed_list.append(float(part))
+                    else:
+                        parsed_list.append(int(part))
+                except ValueError:
+                    parsed_list.append(part)
+            return parsed_list
+            
+        # 3. Single argument
+        else:
+            cleaned = args_str.strip('"').strip("'")
+            try:
+                if '.' in cleaned:
+                    return float(cleaned)
+                else:
+                    return int(cleaned)
+            except ValueError:
+                return cleaned
 
     def _execute_tool(self, tool_name: str, args: str) -> str:
         """
-        Hàm bổ trợ tìm kiếm tool theo tên, ép kiểu dữ liệu bằng Pydantic và chạy hàm.
+        Helper method to execute tools by name with Pydantic validation.
         """
         for tool in self.tools:
             if tool['name'] == tool_name:
                 try:
-                    # Chuyển đổi chuỗi tham số thành Python Dictionary
-                    parsed_args = json.loads(args) if isinstance(args, str) else args
-                    
-                    # Điểm mấu chốt: Dùng Pydantic Model đã thống nhất ở tầng tool để kiểm thử tính hợp lệ
-                    validated_data = tool["input_model"](**parsed_args)
-                    
-                    # Thực thi hàm logic thực tế từ file src/tools/
-                    return tool["function"](**validated_data.model_dump())
-                    
-                except json.JSONDecodeError:
-                    return f"Lỗi: Tham số truyền vào hàm {tool_name} không phải là định dạng JSON hợp lệ."
+                    parsed_args = self._parse_args(args)
+                    if not isinstance(parsed_args, dict):
+                        return f"Lỗi: Tham số của '{tool_name}' phải ở dạng key=value, nhận được: {args}"
+
+                    # Pydantic validates field names, types, and required fields
+                    validated = tool["input_model"](**parsed_args)
+                    return str(tool["function"](**validated.model_dump()))
+
                 except Exception as e:
-                    return f"Lỗi thực thi dữ liệu tại {tool_name}: {str(e)}"
-                    
-        return f"Lỗi: Không tìm thấy công cụ mang tên '{tool_name}' trong hệ thống."
+                    return f"Lỗi thực thi tool '{tool_name}': {str(e)}"
+
+        return f"Lỗi: Không tìm thấy tool '{tool_name}' trong hệ thống."
