@@ -18,26 +18,32 @@ from src.tools.tools_resources import (
 AVAILABLE_TOOLS = [
     {
         "name": "get_student_academic_records",
-        "description": "Tra cứu bảng điểm chi tiết, nhận xét định kỳ từ giáo viên và chuyên cần của học sinh. Đầu vào: student_id (str).",
+        "description": (
+            "Tra cứu điểm số, chuyên cần, nhận xét giáo viên của học sinh. "
+            "Dùng khi phụ huynh hỏi về: điểm, học lực, bảng điểm, số buổi vắng/muộn, nhận xét, tình hình học tập. "
+            "Đầu vào: student_id — mã học sinh (VD: 'HS001') HOẶC tên học sinh (VD: 'Nguyễn Minh Quân')."
+        ),
         "function": get_student_academic_records,
         "input_model": AcademicRecordInput
     },
     {
         "name": "get_daily_activity_and_wellbeing",
-        "description": "Tra cứu nhật ký sinh hoạt hôm nay tại trường: thực đơn, sức khỏe, tâm lý và lời dặn của giáo viên. Đầu vào: student_id (str).",
+        "description": (
+            "Tra cứu nhật ký sinh hoạt hôm nay: thực đơn bữa ăn, tình trạng sức khỏe, tâm lý và lời dặn của giáo viên. "
+            "Dùng khi phụ huynh hỏi về: ăn gì, sức khỏe, tâm lý, sinh hoạt hôm nay. "
+            "Đầu vào: student_id — mã học sinh (VD: 'HS001') HOẶC tên học sinh."
+        ),
         "function": get_daily_activity_and_wellbeing,
         "input_model": DailyWellbeingInput
     },
     {
         "name": "get_learning_resources",
-        "description": "Tìm kiếm kho bài tập bổ trợ, phương pháp học tập tư duy từ thư viện nhà trường. Đầu vào: subject (str), grade (int), topic (str hoặc bỏ trống).",
+        "description": (
+            "Tìm tài liệu, bài tập bổ trợ từ thư viện nhà trường theo môn học và khối lớp. "
+            "Dùng khi phụ huynh hỏi về: tài liệu, bài tập, cách học, gợi ý ôn tập cho một môn cụ thể. "
+            "Đầu vào: subject (tên môn), grade (số khối), topic (chủ đề, có thể bỏ trống)."
+        ),
         "function": get_learning_resources,
         "input_model": LearningResourceInput
     },
-    {
-        "name": "verify_parent_access",
-        "description": "Xác thực mã OTP của phụ huynh trước khi truy xuất dữ liệu nhạy cảm. Đầu vào: student_id (str), otp_code (str).",
-        "function": verify_parent_access,
-        "input_model": SecurityVerificationInput
-    }
 ]

@@ -6,6 +6,9 @@ STUDENT_DB = {
         "grade": 4,
         "class": "4A1",
         "attendance_rate": "95%",
+        "total_sessions": 100,
+        "absent_days": 3,
+        "late_days": 2,
         "teacher_remark": "Quân thông minh, năng nổ nhưng dạo gần đây hay mất tập trung trong giờ Toán, chưa thuộc bảng cửu chương 7, 8, 9.",
         "subjects": {
             "Toán": {"midterm": 6.0, "final": 5.5, "status": "Cần cải thiện"},
@@ -18,6 +21,9 @@ STUDENT_DB = {
         "grade": 5,
         "class": "5B",
         "attendance_rate": "100%",
+        "total_sessions": 100,
+        "absent_days": 0,
+        "late_days": 0,
         "teacher_remark": "Tuệ Lâm học đều các môn, kỹ năng viết văn sáng tạo tốt. Cần phát huy thêm sự tự tin khi phát biểu.",
         "subjects": {
             "Toán": {"midterm": 9.0, "final": 9.5, "status": "Xuất sắc"},
@@ -29,8 +35,11 @@ STUDENT_DB = {
         "name": "Lê Hoàng Phúc",
         "grade": 4,
         "class": "4A1",
-        "attendance_rate": "95%",
-        "teacher_remark": "Phúc lười học  dạo gần đây hay mất tập trung trong giờ Toán, chưa thuộc bảng cửu chương 7, 8, 9.",
+        "attendance_rate": "72%",
+        "total_sessions": 100,
+        "absent_days": 18,
+        "late_days": 10,
+        "teacher_remark": "Phúc hay đi học muộn và vắng nhiều buổi, cần phụ huynh phối hợp nhắc nhở con đi học đúng giờ và đều đặn hơn.",
         "subjects": {
             "Toán": {"midterm": 6.0, "final": 5.5, "status": "Cần cải thiện"},
             "Tiếng Việt": {"midterm": 2.5, "final": 3.0, "status": "Kém"},

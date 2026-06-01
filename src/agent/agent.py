@@ -8,10 +8,11 @@ from src.telemetry.logger import logger
 from src.telemetry.metrics import tracker
 
 try:
-    from src.tools.mock_db import STUDENT_DB, DAILY_LIFE_DB
+    from src.tools.mock_db import STUDENT_DB, DAILY_LIFE_DB, RESOURCE_DB
 except Exception:
     STUDENT_DB = {}
     DAILY_LIFE_DB = {}
+    RESOURCE_DB = {}
 
 class ReActAgent:
     """
@@ -46,6 +47,20 @@ class ReActAgent:
             "Chào bạn, mình là trợ lý học tập của phụ huynh. "
             "Mình có thể hỗ trợ theo dõi điểm, chuyên cần, thời khóa biểu và gợi ý cách kèm con học hiệu quả."
         )
+
+    def _clean_response(self, text: str) -> str:
+        """Xóa các nhãn nội bộ Thought: / Action: / Final Answer: trước khi trả về FE."""
+        # Xóa toàn bộ các dòng bắt đầu bằng Thought:
+        text = re.sub(r"(?im)^Thought:.*?(?=\nFinal Answer:|\nAction:|\Z)", "", text, flags=re.DOTALL)
+        # Xóa tiền tố Final Answer:
+        text = re.sub(r"(?i)^Final Answer:\s*", "", text.strip())
+        # Xóa các dòng Action: ... (artifact của ReAct)
+        text = re.sub(r"(?im)^Action:\s*\S+.*$", "", text)
+        text = re.sub(r"(?im)^Action Input:\s*.*$", "", text)
+        text = re.sub(r"(?im)^Observation:\s*.*$", "", text)
+        # Xóa các dòng trống thừa
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     def _extract_student_id(self, text: str) -> Optional[str]:
         match = re.search(r"\bHS\d{3}\b", text or "", flags=re.IGNORECASE)
@@ -126,7 +141,35 @@ class ReActAgent:
         except Exception as exc:
             return f"Error executing tool '{tool_name}': {exc}"
 
-    def _build_tool_response(self, raw: str) -> str:
+    # --- keyword sets for intent detection ---
+    _ATTENDANCE_KW = {
+        "muộn", "muon", "muôn", "trễ", "tre", "vắng", "vang",
+        "nghỉ", "nghi", "buổi", "buoi", "điểm danh", "chuyên cần",
+        "đúng giờ", "ngày nghỉ",
+    }
+    _SCORE_KW = {
+        "điểm", "diem", "học lực", "hoc luc", "bảng điểm", "môn",
+        "toán", "văn", "anh", "tiếng việt",
+    }
+    _FULL_KW = {
+        "tình hình", "tinh hinh", "kết quả", "ket qua", "học tập",
+        "hoc tap", "tổng hợp", "nhận xét", "nhan xet", "gợi ý", "goi y",
+    }
+
+    def _detect_intent(self, question: str) -> str:
+        """Return 'attendance', 'scores', or 'full' based on question keywords."""
+        q = (question or "").lower()
+        tokens = set(re.split(r"[\s,;]+", q))
+        # Check multi-word phrases first
+        if any(kw in q for kw in self._FULL_KW):
+            return "full"
+        if any(kw in q for kw in self._ATTENDANCE_KW):
+            return "attendance"
+        if any(kw in q for kw in self._SCORE_KW):
+            return "scores"
+        return "full"
+
+    def _build_tool_response(self, raw: str, question: str = "") -> str:
         try:
             data = json.loads(raw)
         except Exception:
@@ -135,23 +178,104 @@ class ReActAgent:
         if isinstance(data, dict) and data.get("error"):
             return str(data["error"])
 
+        # --- Academic records ---
         if isinstance(data, dict) and data.get("name") and data.get("subjects"):
             name = data.get("name", "Học sinh")
+            grade = data.get("grade", "?")
+            cls = data.get("class", "?")
             attendance = data.get("attendance_rate", "?")
             remark = data.get("teacher_remark", "")
             subjects = data.get("subjects", {})
-            lines = [
-                f"Kết quả học tập của {name}:",
-                f"- Chuyên cần: {attendance}",
-            ]
-            for subject, score in subjects.items():
-                midterm = score.get("midterm", "?")
-                final = score.get("final", "?")
-                status = score.get("status", "")
-                lines.append(f"- {subject}: giữa kỳ {midterm}, cuối kỳ {final} ({status})")
+            late_days = data.get("late_days")
+            absent_days = data.get("absent_days")
+            total_sessions = data.get("total_sessions")
+
+            intent = self._detect_intent(question)
+            header = f"📋 {name}  (Lớp {cls} · Khối {grade})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # Build attendance block
+            def attendance_block():
+                attend_line = f"📅 Tỉ lệ chuyên cần: {attendance}"
+                if total_sessions is not None:
+                    attend_line += f"  (/{total_sessions} buổi)"
+                lines = [header, attend_line]
+                if late_days is not None:
+                    icon = "⚠️" if late_days > 5 else ("🟡" if late_days > 0 else "✅")
+                    lines.append(f"  {icon} Đi học muộn: {late_days} buổi")
+                if absent_days is not None:
+                    icon = "🔴" if absent_days > 10 else ("⚠️" if absent_days > 3 else "✅")
+                    lines.append(f"  {icon} Nghỉ học: {absent_days} buổi")
+                return lines
+
+            # Build scores block
+            def scores_block():
+                excellent, good, weak = [], [], []
+                for subj, score in subjects.items():
+                    avg = (score.get("midterm", 0) + score.get("final", 0)) / 2
+                    status = score.get("status", "")
+                    if status == "Xuất sắc" or avg >= 8.5:
+                        excellent.append((subj, score))
+                    elif status in ("Tốt", "Khá") or avg >= 6.5:
+                        good.append((subj, score))
+                    else:
+                        weak.append((subj, score))
+
+                lines = ["📊 ĐIỂM SỐ TỪNG MÔN:"]
+                for subject, score in subjects.items():
+                    midterm = score.get("midterm", "?")
+                    final = score.get("final", "?")
+                    status = score.get("status", "")
+                    trend = ""
+                    if isinstance(midterm, (int, float)) and isinstance(final, (int, float)):
+                        trend = " 📈" if final > midterm else (" 📉" if final < midterm else " ➡️")
+                    emoji = "🌟" if status == "Xuất sắc" else ("✅" if status in ("Tốt", "Khá") else "⚠️")
+                    lines.append(f"  {emoji} {subject}: GK {midterm} → CK {final}{trend}  [{status}]")
+                return lines, weak
+
+            if intent == "attendance":
+                return "\n".join(attendance_block())
+
+            if intent == "scores":
+                score_lines, _ = scores_block()
+                return "\n".join([header] + score_lines)
+
+            # intent == "full"
+            lines = attendance_block()
+            lines.append("")
+
+            score_lines, weak = scores_block()
+            lines += score_lines
+
+            # Phân tích học lực
+            excellent_s = [s for s, sc in subjects.items() if (sc.get("midterm",0)+sc.get("final",0))/2 >= 8.5 or sc.get("status") == "Xuất sắc"]
+            good_s     = [s for s, sc in subjects.items() if s not in excellent_s and ((sc.get("midterm",0)+sc.get("final",0))/2 >= 6.5)]
+            weak_s     = [s for s, sc in subjects.items() if s not in excellent_s and s not in good_s]
+
+            lines += ["", "📝 NHẬN XÉT HỌC LỰC:"]
+            if excellent_s:
+                lines.append(f"  🌟 Thế mạnh: {', '.join(excellent_s)}")
+            if good_s:
+                lines.append(f"  ✅ Ổn định: {', '.join(good_s)}")
+            if weak_s:
+                lines.append(f"  ⚠️ Cần tập trung: {', '.join(weak_s)}")
+
             if remark:
-                lines.append(f"- Nhận xét giáo viên: {remark}")
-            lines.append("Gợi ý: phụ huynh có thể ưu tiên ôn phần còn yếu 20-30 phút mỗi ngày và theo dõi tiến bộ sau 2 tuần.")
+                lines += ["", f"💬 Giáo viên nhận xét:", f"  \"{remark}\""]
+
+            # Gợi ý tài liệu cho môn yếu
+            resource_lines = []
+            for subj in weak_s:
+                grade_int = grade if isinstance(grade, int) else int(str(grade))
+                for res in RESOURCE_DB.get(subj, {}).get(grade_int, [])[:2]:
+                    resource_lines.append(f"  📚 [{res['type']}] {res['title']}")
+            if resource_lines:
+                lines += ["", "🎯 TÀI LIỆU GỢI Ý:"]
+                lines += resource_lines
+
+            lines += [
+                "",
+                "💡 Gợi ý: Dành 20–30 phút/ngày ôn môn còn yếu, theo dõi tiến bộ sau 2 tuần.",
+            ]
             return "\n".join(lines)
 
         return json.dumps(data, ensure_ascii=False)
@@ -165,7 +289,12 @@ class ReActAgent:
         if not student_id and history:
             student_id = self._detect_student_from_conversation(user_input, history)
 
-        academic_keywords = ["điểm", "hoc luc", "học lực", "bảng điểm", "chuyên cần", "nhận xét"]
+        academic_keywords = [
+            "điểm", "hoc luc", "học lực", "bảng điểm", "chuyên cần", "nhận xét",
+            "muộn", "muon", "muôn", "đi trễ", "di tre",
+            "vắng", "vang", "nghỉ học", "nghi hoc",
+            "điểm danh", "đúng giờ", "buổi", "buoi", "ngày nghỉ",
+        ]
         wellbeing_keywords = ["sinh hoạt", "thực đơn", "sức khỏe", "tâm lý", "hôm nay", "ăn gì", "an gi"]
 
         if student_id and any(k in text for k in academic_keywords):
@@ -175,6 +304,13 @@ class ReActAgent:
 
         if student_id and any(k in text for k in wellbeing_keywords):
             raw = self._invoke_tool("get_daily_activity_and_wellbeing", {"student_id": student_id})
+            if raw is not None:
+                return self._build_tool_response(raw)
+
+        # Fallback: nếu tìm thấy học sinh mà không có keyword cụ thể,
+        # vẫn trả về học bạ thay vì để LLM đoán
+        if student_id and not any(k in text for k in wellbeing_keywords):
+            raw = self._invoke_tool("get_student_academic_records", {"student_id": student_id})
             if raw is not None:
                 return self._build_tool_response(raw)
 
@@ -222,8 +358,8 @@ Action: tên_công_cụ(các_tham_số)
 
 HOẶC
 
-Thought: I have gathered all necessary information from the tools and database. I am ready to formulate a comprehensive, empathetic and constructive response to the parent in Vietnamese.
-Final Answer: câu trả lời hoàn chỉnh, chi tiết và đầy tính xây dựng gửi tới phụ huynh (bằng tiếng Việt).
+I have gathered all necessary information from the tools and database. I am ready to formulate a comprehensive, empathetic and constructive response to the parent in Vietnamese.
+ câu trả lời hoàn chỉnh, chi tiết và đầy tính xây dựng gửi tới phụ huynh (bằng tiếng Việt).
 
 LƯU Ý QUAN TRỌNG:
 1. LUÔN LUÔN bắt đầu mỗi lượt phản hồi bằng 'Thought:'.
@@ -270,31 +406,6 @@ LƯU Ý QUAN TRỌNG:
         student_context = self._load_student_profile(active_student_id) if active_student_id else ""
 
         history_context = self._build_history_context(history)
-
-        tool_routed_response = self._route_with_tools(user_input, history)
-        if tool_routed_response is not None:
-            # Pass tool result + full history + current question to LLM for a warm, contextual answer
-            synthesis_prompt = (
-                f"{history_context}"
-                f"Câu hỏi hiện tại: {user_input}\n\n"
-                f"Dữ liệu tra cứu được:\n{tool_routed_response}\n\n"
-                f"Dựa vào lịch sử hội thoại và dữ liệu trên, hãy trả lời câu hỏi bằng tiếng Việt "
-                f"một cách ân cần, có tính xây dựng.\n"
-                f"Final Answer:"
-            )
-            res = self.llm.generate(synthesis_prompt, system_prompt=self.get_system_prompt(student_context))
-            answer = res.get("content", "").strip()
-            # Strip "Final Answer:" prefix if model echoes it
-            answer = re.sub(r"^Final Answer:\s*", "", answer, flags=re.IGNORECASE).strip()
-            if not answer:
-                answer = tool_routed_response
-            logger.log_event("AGENT_END", {
-                "status": "tool_router_shortcut",
-                "steps": 1,
-                "final_answer": answer,
-            })
-            return answer
-
         current_prompt = f"{history_context}Câu hỏi hiện tại: {user_input}\n"
         steps = 0
 
@@ -326,25 +437,31 @@ LƯU Ý QUAN TRỌNG:
             if action_match:
                 tool_name = action_match.group(1)
                 tool_args = action_match.group(2)
-                
+
                 # Execute tool
-                observation = self._execute_tool(tool_name, tool_args)
-                observation_str = f"Observation: {observation}"
-                
-                print(f"\n{observation_str}")
-                
-                # Append current generation + observation back into history
-                current_prompt += f"\n{content}\n{observation_str}\n"
-                
+                raw_observation = self._execute_tool(tool_name, tool_args)
+                print(f"\nObservation: {raw_observation}")
+
+                # Format the raw tool result into a rich response and return immediately
+                # (avoid LLM synthesis step which can drop data on small models)
+                formatted = self._build_tool_response(raw_observation, question=user_input)
+                logger.log_event("AGENT_END", {
+                    "status": "tool_success",
+                    "tool": tool_name,
+                    "steps": steps + 1,
+                    "final_answer": formatted,
+                })
                 logger.log_event("TOOL_EXECUTION", {
                     "tool": tool_name,
                     "arguments": tool_args,
-                    "observation": observation
+                    "observation": raw_observation,
                 })
+                return formatted
+
             elif final_match:
                 final_answer = final_match.group(1).strip()
                 logger.log_event("AGENT_END", {"status": "success", "steps": steps + 1, "final_answer": final_answer})
-                return final_answer
+                return self._clean_response(final_answer)
             else:
                 logger.log_event("PARSER_ERROR", {"content": content})
                 
@@ -353,7 +470,7 @@ LƯU Ý QUAN TRỌNG:
                     parts = content.split("Final Answer:")
                     final_answer = parts[-1].strip()
                     logger.log_event("AGENT_END", {"status": "success_fallback", "steps": steps + 1})
-                    return final_answer
+                    return self._clean_response(final_answer)
 
                 # Fallback for small/local models that return only `Thought:` text.
                 thought_match = re.search(r"Thought:\s*(.*)", content, re.DOTALL)
@@ -365,7 +482,7 @@ LƯU Ý QUAN TRỌNG:
                             "steps": steps + 1,
                             "final_answer": final_answer,
                         })
-                        return final_answer
+                        return self._clean_response(final_answer)
 
                 # Last-resort fallback to avoid UI hanging on parser mismatch.
                 cleaned_content = content.strip()
@@ -375,7 +492,7 @@ LƯU Ý QUAN TRỌNG:
                         "steps": steps + 1,
                         "final_answer": cleaned_content,
                     })
-                    return cleaned_content
+                    return self._clean_response(cleaned_content)
                 
                 # Instruct agent to correct format
                 correction_note = "System Note: Your output did not match 'Action: tool_name(args)' or 'Final Answer: response'. Please follow the instructions."
