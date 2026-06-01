@@ -67,10 +67,17 @@ class ReActAgent:
         if match:
             return match.group(0).upper()
 
-        normalized = (text or "").lower()
+        normalized = re.sub(r"[_\-]+", " ", (text or "")).lower()
+        # Pass 1: full name match
         for student_id, info in STUDENT_DB.items():
             name = str(info.get("name", "")).lower()
             if name and name in normalized:
+                return student_id
+        # Pass 2: any single word in the text matches a name token (e.g. "Phúc", "Quân")
+        words = set(re.split(r"[\s,;]+", normalized))
+        for student_id, info in STUDENT_DB.items():
+            name_tokens = set(re.split(r"[\s]+", str(info.get("name", "")).lower()))
+            if words & name_tokens:  # non-empty intersection
                 return student_id
         return None
 
@@ -111,10 +118,14 @@ class ReActAgent:
     def _detect_student_from_conversation(
         self, current_input: str, history: List[tuple]
     ) -> Optional[str]:
-        """Detect student from current message or any previous turn in history."""
-        all_texts = [current_input] + [content for _, content in history]
-        for text in all_texts:
-            student_id = self._extract_student_id(text)
+        """Detect student — current message takes priority over history."""
+        # Always check current input first
+        student_id = self._extract_student_id(current_input)
+        if student_id:
+            return student_id
+        # Fall back to history only if current message has no student reference
+        for _, content in reversed(history):  # most recent first
+            student_id = self._extract_student_id(content)
             if student_id:
                 return student_id
         return None
