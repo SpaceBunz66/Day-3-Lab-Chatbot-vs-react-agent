@@ -17,7 +17,7 @@ def verify_parent_access(student_id: str, otp_code: str) -> str:
     
     if otp_code == record["correct_otp"]:
         return json.dumps({
-            "status": "SUCCESS", 
+            "status": "SUCCESS",
             "message": f"Xác thực thành công! Phụ huynh hợp pháp của học sinh {student_id} đã được cấp quyền truy cập dữ liệu."
         }, ensure_ascii=False)
     else:
