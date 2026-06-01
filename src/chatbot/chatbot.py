@@ -102,14 +102,11 @@ def run_demo(llm: LLMProvider):
 
 
 if __name__ == "__main__":
-    # Ví dụ chạy với LocalProvider (không cần API key)
-    # Thay bằng OpenAIProvider hoặc GeminiProvider nếu có key.
     try:
         from src.core.local_provider import LocalProvider
 
         model_path = os.environ.get(
             "LOCAL_MODEL_PATH",
-            "models/phi-3-mini-4k-instruct-q4.gguf"
         )
         llm = LocalProvider(model_path=model_path)
         run_demo(llm)
